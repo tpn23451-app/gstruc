@@ -18,10 +18,13 @@ import {
   Filter,
   CheckCircle2,
   User,
-  GraduationCap
+  GraduationCap,
+  ExternalLink,
+  Cloud
 } from 'lucide-react';
 import { sound } from '../utils/sound';
 import { StudentAvatar } from './StudentAvatar';
+import { GOOGLE_SHEET_URL, exportScoresToGoogleSheetCSV } from '../services/googleSheets';
 
 interface ScorebookLeaderboardModalProps {
   isOpen: boolean;
@@ -206,6 +209,10 @@ export const ScorebookLeaderboardModal: React.FC<ScorebookLeaderboardModalProps>
                 <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-amber-950 font-black text-[11px] uppercase tracking-wider">
                   Năm học 2026 - 2027
                 </span>
+                <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  Firebase Online
+                </span>
               </div>
               <p className="text-xs text-slate-500">
                 Lưu giữ điểm số, xếp hạng thi đua và xuất Giấy chứng nhận khen thưởng theo từng đợt khảo sát
@@ -340,10 +347,21 @@ export const ScorebookLeaderboardModal: React.FC<ScorebookLeaderboardModalProps>
                   type="button"
                   onClick={handleExportCSV}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition-all cursor-pointer"
+                  title="Tải tệp bảng điểm CSV tương thích Google Sheets / Excel"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Xuất Excel/CSV</span>
                 </button>
+                <a
+                  href={GOOGLE_SHEET_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs transition-all cursor-pointer shadow-xs"
+                  title="Mở trực tiếp bảng điểm trên Google Sheets"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Mở Google Sheets</span>
+                </a>
               </>
             )}
           </div>

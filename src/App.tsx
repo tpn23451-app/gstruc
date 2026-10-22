@@ -36,6 +36,13 @@ import { MistakeNotebookModal } from './components/MistakeNotebookModal';
 import { ScorebookLeaderboardModal } from './components/ScorebookLeaderboardModal';
 import { CertificateModal } from './components/CertificateModal';
 import { INITIAL_SCORE_RECORDS, DEFAULT_EXAM_BATCHES } from './data/defaultScores';
+import {
+  subscribeToScores,
+  saveScoreToFirebase,
+  deleteScoreFromFirebase,
+  syncBatchScoresToFirebase,
+} from './services/firebase';
+import { sendScoreToGoogleSheetWebhook } from './services/googleSheets';
 import { QUESTIONS_GRADE_5 } from './data/questionsGrade5';
 import { Grade5ExamAuditAndGameModal } from './components/Grade5ExamAuditAndGameModal';
 import {
@@ -202,6 +209,23 @@ export default function App() {
     } catch {
       initDemoData();
     }
+
+    // Đồng bộ điểm ban đầu lên Firebase nếu trên đám mây chưa có
+    syncBatchScoresToFirebase(INITIAL_SCORE_RECORDS);
+
+    // Lắng nghe điểm số thời gian thực từ Firebase Realtime Database
+    const unsubscribeScores = subscribeToScores((remoteScores) => {
+      if (remoteScores && remoteScores.length > 0) {
+        setScores(remoteScores);
+        try {
+          localStorage.setItem('ontap_student_scorebook', JSON.stringify(remoteScores));
+        } catch {}
+      }
+    });
+
+    return () => {
+      unsubscribeScores();
+    };
   }, []);
 
   // Multi-lesson toggle
@@ -784,6 +808,10 @@ export default function App() {
       avatar: studentProfile?.avatar || 'robot-ai',
     };
 
+    // Tự động lưu lên Firebase và gửi đến Google Sheets Webhook (nếu có)
+    saveScoreToFirebase(scoreRecord);
+    sendScoreToGoogleSheetWebhook(scoreRecord);
+
     setScores((prev) => {
       const updated = [scoreRecord, ...prev].slice(0, 100);
       try {
@@ -849,6 +877,8 @@ export default function App() {
 
   // Scorebook & Certificate operations
   const handleAddScore = (newScore: StudentScoreRecord) => {
+    saveScoreToFirebase(newScore);
+    sendScoreToGoogleSheetWebhook(newScore);
     setScores((prev) => {
       const updated = [newScore, ...prev];
       try {
@@ -859,6 +889,7 @@ export default function App() {
   };
 
   const handleDeleteScore = (scoreId: string) => {
+    deleteScoreFromFirebase(scoreId);
     setScores((prev) => {
       const updated = prev.filter((s) => s.id !== scoreId);
       try {
