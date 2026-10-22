@@ -1,0 +1,8 @@
+{
+  "name": "App Gia sư Tin học 8",
+  "description": "Ứng dụng tạo câu hỏi và đề thi ôn tập thông minh cho học sinh theo từng bài học, số lượng câu tùy chọn với 3 cấp độ (Dễ, Trung bình, Khó) và đề tổng hợp 3 cấp độ kèm đáp án, lời giải chi tiết.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
