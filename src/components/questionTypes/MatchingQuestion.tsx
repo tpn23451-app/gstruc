@@ -58,6 +58,25 @@ export const MatchingQuestion: React.FC<MatchingQuestionProps> = ({
     return {};
   }, [question.correctMatches, question.pairs]);
 
+  // Xáo trộn ngẫu nhiên Cột B để bài tập không bị trùng hàng ngang với Cột A
+  const displayRightItems = useMemo(() => {
+    if (rightItems.length <= 1) return rightItems;
+    const arr = [...rightItems];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    // Tránh việc vô tình xáo trộn mà vẫn trùng 100% thứ tự nối
+    if (
+      arr.length >= 2 &&
+      leftItems.length === arr.length &&
+      arr.every((r, idx) => leftItems[idx] && r.id === correctMatches[leftItems[idx].id])
+    ) {
+      [arr[0], arr[1]] = [arr[1], arr[0]];
+    }
+    return arr;
+  }, [rightItems, leftItems, correctMatches, question.id]);
+
   const [selectedLeftId, setSelectedLeftId] = useState<string | null>(null);
 
   // Pick left item
@@ -247,7 +266,7 @@ export const MatchingQuestion: React.FC<MatchingQuestionProps> = ({
           </div>
 
           <div className="space-y-2.5">
-            {rightItems.map((item, idx) => {
+            {displayRightItems.map((item, idx) => {
               // Check if any left item is mapped to this right item
               const pairedLeftKey = Object.keys(userAnswer).find((k) => userAnswer[k] === item.id);
               const isPaired = Boolean(pairedLeftKey);
@@ -307,7 +326,7 @@ export const MatchingQuestion: React.FC<MatchingQuestionProps> = ({
             {Object.entries(userAnswer).map(([lId, rId]) => {
               const lItem = leftItems.find((l) => l.id === lId);
               const rItem = rightItems.find((r) => r.id === rId);
-              const isCorrect = isPracticeMode && correctMatches[lId] === rId;
+              const isCorrect = isPracticeMode && isPairMatch(lId, rId, correctMatches, rightItems);
 
               return (
                 <div

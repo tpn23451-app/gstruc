@@ -191,7 +191,7 @@ export const FillBlankQuestion: React.FC<FillBlankQuestionProps> = ({
             Đã điền {currentAnswers.filter(Boolean).length}/{blanks.length} vị trí.
           </span>
           <span className="font-semibold">
-            {currentAnswers.every((ans, idx) => ans.trim().toLowerCase() === blanks[idx]?.trim().toLowerCase())
+            {currentAnswers.every((ans, idx) => isBlankValueMatch(ans, blanks[idx]))
               ? '🎉 Tuyệt vời! Bạn đã điền chính xác toàn bộ!'
               : '💡 Hãy kiểm tra lại các từ chưa đúng màu đỏ.'}
           </span>

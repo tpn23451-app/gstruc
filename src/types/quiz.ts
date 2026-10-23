@@ -173,3 +173,21 @@ export interface CertificateData {
   date: number;
   certificateCode: string;
 }
+
+export interface CustomExam {
+  id: string;
+  title: string;
+  description: string;
+  subject: string;
+  grade: string;
+  gradeNumber: 3 | 4 | 5 | 6 | 7 | 8 | 9;
+  category: 'exam' | 'practice'; // 'exam' (Đề thi tính giờ) | 'practice' (Đề ôn tập)
+  durationMinutes: number; // Thời gian làm bài (phút)
+  questions: Question[];
+  createdAt: number;
+  updatedAt: number;
+  authorEmail: string; // 'saohom2002@gmail.com'
+  authorName?: string;
+  isPublished: boolean;
+}
+

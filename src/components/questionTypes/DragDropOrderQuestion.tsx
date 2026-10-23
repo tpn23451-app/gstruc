@@ -34,11 +34,27 @@ export const DragDropOrderQuestion: React.FC<DragDropOrderQuestionProps> = ({
     return initialItems.map((it) => it.id);
   }, [question.correctOrder, initialItems]);
 
+  // Xáo trộn ngẫu nhiên thứ tự ban đầu để học sinh cần thao tác sắp xếp
+  const defaultShuffledOrder = useMemo(() => {
+    const ids = initialItems.map((it) => it.id);
+    if (ids.length <= 1) return ids;
+    const arr = [...ids];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    // Đảm bảo không trùng ngẫu nhiên 100% với đáp án đúng
+    if (arr.length >= 2 && arr.every((id, idx) => id === correctOrder[idx])) {
+      [arr[0], arr[1]] = [arr[1], arr[0]];
+    }
+    return arr;
+  }, [initialItems, correctOrder, question.id]);
+
   // Determine current sequence
   const currentOrder: string[] =
     userAnswer && userAnswer.length === initialItems.length
       ? userAnswer
-      : initialItems.map((it) => it.id);
+      : defaultShuffledOrder;
 
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
@@ -90,7 +106,7 @@ export const DragDropOrderQuestion: React.FC<DragDropOrderQuestionProps> = ({
   const handleReset = () => {
     if (disabled) return;
     sound.playClick();
-    onAnswer(initialItems.map((it) => it.id));
+    onAnswer(defaultShuffledOrder);
   };
 
   return (
@@ -121,8 +137,9 @@ export const DragDropOrderQuestion: React.FC<DragDropOrderQuestionProps> = ({
           const item = initialItems.find((it) => it.id === itemId);
           if (!item) return null;
 
-          const isCorrectPosition = isPracticeMode && correctOrder[index] === itemId;
-          const isWrongPosition = isPracticeMode && correctOrder[index] !== itemId;
+          const hasAnswered = Boolean(userAnswer && userAnswer.length === initialItems.length);
+          const isCorrectPosition = isPracticeMode && hasAnswered && correctOrder[index] === itemId;
+          const isWrongPosition = isPracticeMode && hasAnswered && correctOrder[index] !== itemId;
 
           return (
             <div

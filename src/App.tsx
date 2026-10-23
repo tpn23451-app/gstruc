@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   DifficultyLevel,
   LessonTopic,
@@ -11,6 +11,7 @@ import {
   WrongQuestionRecord,
   StudentScoreRecord,
   CertificateData,
+  CustomExam,
 } from './types/quiz';
 import {
   CURRICULUM_LESSONS,
@@ -36,12 +37,22 @@ import { MistakeNotebookModal } from './components/MistakeNotebookModal';
 import { ScorebookLeaderboardModal } from './components/ScorebookLeaderboardModal';
 import { CertificateModal } from './components/CertificateModal';
 import { INITIAL_SCORE_RECORDS, DEFAULT_EXAM_BATCHES } from './data/defaultScores';
+import { DEFAULT_CUSTOM_EXAMS } from './data/defaultCustomExams';
 import {
   subscribeToScores,
   saveScoreToFirebase,
   deleteScoreFromFirebase,
   syncBatchScoresToFirebase,
+  subscribeToCustomExams,
+  syncInitialCustomExamsToFirebase,
+  getStoredAdminSession,
+  isAuthorizedAdmin,
+  ADMIN_EMAIL,
+  AdminSession,
 } from './services/firebase';
+import { AdminAuthModal } from './components/admin/AdminAuthModal';
+import { AdminStudioModal } from './components/admin/AdminStudioModal';
+import { AdminExamSection } from './components/admin/AdminExamSection';
 import { sendScoreToGoogleSheetWebhook } from './services/googleSheets';
 import { QUESTIONS_GRADE_5 } from './data/questionsGrade5';
 import { Grade5ExamAuditAndGameModal } from './components/Grade5ExamAuditAndGameModal';
@@ -130,6 +141,11 @@ export default function App() {
   const [grade5AuditInitialTab, setGrade5AuditInitialTab] = useState<'audit' | 'game'>('audit');
   const [lastUpdatedProfileMsg, setLastUpdatedProfileMsg] = useState<string>('');
 
+  // Track previous step before entering print view
+  const [stepBeforePrint, setStepBeforePrint] = useState<'setup' | 'result'>('setup');
+  // Pending session restore across browser reloads
+  const [pendingResumeSession, setPendingResumeSession] = useState<QuizSession | null>(null);
+
   // Mistake Notebook state
   const [mistakes, setMistakes] = useState<WrongQuestionRecord[]>([]);
   const [isMistakeModalOpen, setIsMistakeModalOpen] = useState<boolean>(false);
@@ -148,6 +164,21 @@ export default function App() {
   const [isScorebookModalOpen, setIsScorebookModalOpen] = useState<boolean>(false);
   const [activeCertificates, setActiveCertificates] = useState<CertificateData[]>([]);
   const [isCertificateModalOpen, setIsCertificateModalOpen] = useState<boolean>(false);
+
+  // Admin Studio state (Chỉ dành riêng cho saohom2002@gmail.com)
+  const [adminSession, setAdminSession] = useState<AdminSession | null>(() => getStoredAdminSession());
+  const [isAdminAuthModalOpen, setIsAdminAuthModalOpen] = useState<boolean>(false);
+  const [isAdminStudioModalOpen, setIsAdminStudioModalOpen] = useState<boolean>(false);
+  const [customExams, setCustomExams] = useState<CustomExam[]>(() => {
+    try {
+      const raw = localStorage.getItem('ontap_admin_custom_exams');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return DEFAULT_CUSTOM_EXAMS;
+  });
 
   // Load history, student profile, custom API key, sound preference & mistakes from localStorage
   useEffect(() => {
@@ -206,6 +237,22 @@ export default function App() {
         setSoundEnabled(val);
         sound.enabled = val;
       }
+
+      // Check for active in-progress quiz session across reloads
+      const savedActive = localStorage.getItem('ontap_active_session');
+      if (savedActive) {
+        try {
+          const parsedActive: QuizSession = JSON.parse(savedActive);
+          if (
+            parsedActive &&
+            parsedActive.status === 'in_progress' &&
+            Array.isArray(parsedActive.questions) &&
+            parsedActive.questions.length > 0
+          ) {
+            setPendingResumeSession(parsedActive);
+          }
+        } catch {}
+      }
     } catch {
       initDemoData();
     }
@@ -223,10 +270,30 @@ export default function App() {
       }
     });
 
+    // Đồng bộ đề thi Admin mẫu ban đầu lên Firebase nếu trên đám mây chưa có
+    syncInitialCustomExamsToFirebase();
+
+    // Lắng nghe đề thi và đề ôn tập thời gian thực từ Firebase Realtime Database
+    const unsubscribeExams = subscribeToCustomExams((remoteExams) => {
+      if (remoteExams && remoteExams.length > 0) {
+        setCustomExams(remoteExams);
+      }
+    });
+
     return () => {
       unsubscribeScores();
+      unsubscribeExams();
     };
   }, []);
+
+  // Auto-save active quiz session to survive accidental browser reloads
+  useEffect(() => {
+    if (step === 'quiz' && currentSession && currentSession.status === 'in_progress') {
+      try {
+        localStorage.setItem('ontap_active_session', JSON.stringify(currentSession));
+      } catch {}
+    }
+  }, [step, currentSession]);
 
   // Multi-lesson toggle
   const handleToggleLesson = (lesson: LessonTopic) => {
@@ -347,9 +414,95 @@ export default function App() {
       timeSpentSeconds: 0,
       source: 'offline_bank',
     };
+    setStepBeforePrint('setup');
     setCurrentSession(newSession);
     setStep('print');
     setIsGrade5AuditModalOpen(false);
+  };
+
+  // ==========================================================================
+  // ADMIN STUDIO HANDLERS (DÀNH RIÊNG CHO saohom2002@gmail.com)
+  // ==========================================================================
+  const handleOpenAdminStudio = () => {
+    sound.playClick();
+    if (adminSession && isAuthorizedAdmin(adminSession.email)) {
+      setIsAdminStudioModalOpen(true);
+    } else {
+      setIsAdminAuthModalOpen(true);
+    }
+  };
+
+  const handleLaunchCustomExam = (exam: CustomExam, mode: 'exam' | 'practice' = 'exam') => {
+    sound.playClick();
+    if (!exam.questions || exam.questions.length === 0) {
+      alert('Đề thi này hiện chưa có câu hỏi nào. Vui lòng vào Studio để thêm câu hỏi!');
+      return;
+    }
+
+    const newSession: QuizSession = {
+      id: `sess-custom-${exam.id}-${Date.now()}`,
+      lessonId: exam.id,
+      lessonIds: [exam.id],
+      lessonTitle: exam.title,
+      selectedLessonTitles: [exam.title],
+      subject: exam.subject || 'Tin học THCS',
+      grade: exam.grade || `Khối ${exam.gradeNumber}`,
+      gradeNumber: exam.gradeNumber,
+      difficultyMode: 'tong_hop',
+      totalQuestions: exam.questions.length,
+      questions: exam.questions,
+      userAnswers: {},
+      flaggedQuestions: [],
+      startTime: Date.now(),
+      score: 0,
+      percentage: 0,
+      status: 'in_progress',
+      mode: mode || exam.category || 'exam',
+      timeSpentSeconds: 0,
+      source: 'offline_bank',
+    };
+
+    setCurrentGradeFilter(exam.gradeNumber);
+    setEducationLevel([3, 4, 5].includes(exam.gradeNumber) ? 'tieu_hoc' : 'thcs');
+    setCurrentSession(newSession);
+    setStep('quiz');
+    setIsAdminStudioModalOpen(false);
+  };
+
+  const handlePrintCustomExam = (exam: CustomExam) => {
+    sound.playClick();
+    if (!exam.questions || exam.questions.length === 0) {
+      alert('Đề thi này hiện chưa có câu hỏi nào để in!');
+      return;
+    }
+
+    const newSession: QuizSession = {
+      id: `sess-print-custom-${exam.id}-${Date.now()}`,
+      lessonId: exam.id,
+      lessonIds: [exam.id],
+      lessonTitle: exam.title,
+      selectedLessonTitles: [exam.title],
+      subject: exam.subject || 'Tin học THCS',
+      grade: exam.grade || `Khối ${exam.gradeNumber}`,
+      gradeNumber: exam.gradeNumber,
+      difficultyMode: 'tong_hop',
+      totalQuestions: exam.questions.length,
+      questions: exam.questions,
+      userAnswers: {},
+      flaggedQuestions: [],
+      startTime: Date.now(),
+      score: 10,
+      percentage: 100,
+      status: 'completed',
+      mode: 'exam',
+      timeSpentSeconds: 0,
+      source: 'offline_bank',
+    };
+
+    setStepBeforePrint('setup');
+    setCurrentSession(newSession);
+    setStep('print');
+    setIsAdminStudioModalOpen(false);
   };
 
   // Select all lessons in current grade
@@ -531,17 +684,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isGenerating]);
 
-  // Main action: Generate Quiz Questions
-  const handleStartGenerateQuiz = async () => {
+  // Main action: Generate Quiz Questions (supports regenerating from existing session)
+  const handleStartGenerateQuiz = async (
+    overrideSession?: QuizSession | React.MouseEvent | any
+  ) => {
     sound.playClick();
+
+    const validOverride: QuizSession | undefined =
+      overrideSession &&
+      typeof overrideSession === 'object' &&
+      'id' in overrideSession &&
+      'lessonTitle' in overrideSession
+        ? (overrideSession as QuizSession)
+        : undefined;
 
     let title = '';
     let subject = '';
     let grade = `Khối ${currentGradeFilter}`;
+    let gradeNum: 3 | 4 | 5 | 6 | 7 | 8 | 9 = currentGradeFilter;
     let targetKeys: string[] = [];
     let targetLessonTitles: string[] = [];
+    let reqCount = questionCount;
+    let reqDifficulty = difficulty;
+    let reqMode = quizMode;
 
-    if (isCustomMode) {
+    if (validOverride) {
+      title = validOverride.lessonTitle;
+      subject = validOverride.subject || 'Ôn tập';
+      grade = validOverride.grade || `Khối ${validOverride.gradeNumber || currentGradeFilter}`;
+      const gN = validOverride.gradeNumber;
+      if (gN && [3, 4, 5, 6, 7, 8, 9].includes(gN)) {
+        gradeNum = gN as 3 | 4 | 5 | 6 | 7 | 8 | 9;
+      }
+      targetKeys =
+        validOverride.lessonIds && validOverride.lessonIds.length > 0
+          ? validOverride.lessonIds
+          : [validOverride.lessonId || title];
+      targetLessonTitles =
+        validOverride.selectedLessonTitles && validOverride.selectedLessonTitles.length > 0
+          ? validOverride.selectedLessonTitles
+          : [title];
+      reqCount = validOverride.totalQuestions || questionCount;
+      reqDifficulty = validOverride.difficultyMode || difficulty;
+      reqMode = validOverride.mode || quizMode;
+    } else if (isCustomMode) {
       if (!customLessonTitle.trim()) {
         alert('Vui lòng nhập tên bài học hoặc chủ đề muốn ôn tập!');
         return;
@@ -577,15 +763,15 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          lessonIds: isCustomMode ? [] : targetKeys,
-          lessons: isCustomMode ? [title] : targetLessonTitles,
+          lessonIds: isCustomMode && !overrideSession ? [] : targetKeys,
+          lessons: isCustomMode && !overrideSession ? [title] : targetLessonTitles,
           lesson: title,
           subject,
           grade,
-          gradeNumber: currentGradeFilter,
-          count: questionCount,
-          difficulty,
-          customContent: isCustomMode ? customNotes : '',
+          gradeNumber: gradeNum,
+          count: reqCount,
+          difficulty: reqDifficulty,
+          customContent: isCustomMode && !overrideSession ? customNotes : '',
           apiKey: customApiKey,
           sourcePreference,
         }),
@@ -605,22 +791,22 @@ export default function App() {
           return true;
         });
 
-        if (unique.length >= questionCount) {
-          questions = unique.slice(0, questionCount);
+        if (unique.length >= reqCount) {
+          questions = unique.slice(0, reqCount);
         } else {
-          const extra = generateFallbackQuestions(targetKeys, questionCount, difficulty, currentGradeFilter);
+          const extra = generateFallbackQuestions(targetKeys, reqCount, reqDifficulty, gradeNum);
           for (const ex of extra) {
-            if (unique.length >= questionCount) break;
+            if (unique.length >= reqCount) break;
             const k = ex.question.trim().toLowerCase();
             if (!seen.has(k)) {
               seen.add(k);
               unique.push(ex);
             }
           }
-          questions = unique.slice(0, questionCount);
+          questions = unique.slice(0, reqCount);
         }
       } else {
-        questions = generateFallbackQuestions(targetKeys, questionCount, difficulty, currentGradeFilter);
+        questions = generateFallbackQuestions(targetKeys, reqCount, reqDifficulty, gradeNum);
         finalSource = 'offline_fallback';
       }
 
@@ -633,8 +819,8 @@ export default function App() {
         selectedLessonTitles: targetLessonTitles,
         subject,
         grade,
-        gradeNumber: currentGradeFilter,
-        difficultyMode: difficulty,
+        gradeNumber: gradeNum,
+        difficultyMode: reqDifficulty,
         totalQuestions: questions.length,
         questions,
         userAnswers: {},
@@ -643,7 +829,7 @@ export default function App() {
         score: 0,
         percentage: 0,
         status: 'in_progress',
-        mode: quizMode,
+        mode: reqMode,
         timeSpentSeconds: 0,
         source: finalSource,
       };
@@ -652,7 +838,7 @@ export default function App() {
       setStep('quiz');
     } catch (err) {
       console.warn('API error, using local fallback:', err);
-      const fallback = generateFallbackQuestions(targetKeys, questionCount, difficulty, currentGradeFilter);
+      const fallback = generateFallbackQuestions(targetKeys, reqCount, reqDifficulty, gradeNum);
       const newSession: QuizSession = {
         id: `sess-${Date.now()}`,
         lessonId: targetKeys[0],
@@ -661,8 +847,8 @@ export default function App() {
         selectedLessonTitles: targetLessonTitles,
         subject,
         grade,
-        gradeNumber: currentGradeFilter,
-        difficultyMode: difficulty,
+        gradeNumber: gradeNum,
+        difficultyMode: reqDifficulty,
         totalQuestions: fallback.length,
         questions: fallback,
         userAnswers: {},
@@ -671,7 +857,7 @@ export default function App() {
         score: 0,
         percentage: 0,
         status: 'in_progress',
-        mode: quizMode,
+        mode: reqMode,
         timeSpentSeconds: 0,
         source: 'offline_fallback',
       };
@@ -822,14 +1008,27 @@ export default function App() {
 
     setCurrentSession(completedSession);
     saveSessionToHistory(completedSession);
+    try {
+      localStorage.removeItem('ontap_active_session');
+    } catch {}
     setStep('result');
+  };
+
+  // Exit Quiz handler
+  const handleExitQuiz = () => {
+    sound.playClick();
+    setCurrentSession(null);
+    setStep('setup');
+    try {
+      localStorage.removeItem('ontap_active_session');
+    } catch {}
   };
 
   // Mistake Notebook operations
   const handleRemoveMistake = (questionId: string) => {
     sound.playClick();
     setMistakes((prev) => {
-      const updated = prev.filter((m) => m.question.id !== questionId);
+      const updated = prev.filter((m) => m.id !== questionId && m.question.id !== questionId);
       try {
         localStorage.setItem('ontap_wrong_questions', JSON.stringify(updated));
       } catch {}
@@ -937,7 +1136,8 @@ export default function App() {
 
   // Generate fresh questions for same topic
   const handleGenerateNewWithSameTopic = () => {
-    handleStartGenerateQuiz();
+    if (!currentSession) return;
+    handleStartGenerateQuiz(currentSession);
   };
 
   // Clear all history
@@ -971,9 +1171,46 @@ export default function App() {
     }
   };
 
+  // Thông tin tóm tắt cho nút cố định trên Header
+  const headerSummaryInfo = useMemo(() => {
+    const lessonText = isCustomMode
+      ? customLessonTitle || 'Bài học tự nhập'
+      : selectedLessons.length === 0
+      ? 'Chưa chọn bài nào'
+      : selectedLessons.length === 1
+      ? `${selectedLessons[0].title} (Khối ${currentGradeFilter})`
+      : `${selectedLessons.length} bài học Khối ${currentGradeFilter}`;
+
+    const diffText =
+      difficulty === 'de'
+        ? 'Cấp độ Dễ'
+        : difficulty === 'trung_binh'
+        ? 'Cấp độ Trung bình'
+        : difficulty === 'kho'
+        ? 'Cấp độ Khó'
+        : 'Tổng hợp 3 cấp độ';
+
+    const sourceText = sourcePreference === 'ai' ? '🤖 AI Thông Minh' : '💾 Kho Offline';
+
+    return {
+      lesson: lessonText,
+      count: questionCount,
+      difficulty: diffText,
+      source: sourceText,
+    };
+  }, [
+    isCustomMode,
+    customLessonTitle,
+    selectedLessons,
+    currentGradeFilter,
+    difficulty,
+    sourcePreference,
+    questionCount,
+  ]);
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col text-slate-800">
-      {/* Global Header */}
+      {/* Global Header với nút cố định Bắt đầu ôn tập thay thế */}
       <Header
         onOpenHistory={() => setIsHistoryOpen(true)}
         historyCount={history.length}
@@ -986,12 +1223,70 @@ export default function App() {
         onOpenMistakes={() => setIsMistakeModalOpen(true)}
         mistakesCount={mistakes.length}
         onOpenScorebook={() => setIsScorebookModalOpen(true)}
+        onOpenAdminStudio={handleOpenAdminStudio}
+        isAdminLoggedIn={Boolean(adminSession && isAuthorizedAdmin(adminSession.email))}
+        onStartGenerateQuiz={handleStartGenerateQuiz}
+        isGenerating={isGenerating}
+        canStartQuiz={isCustomMode || selectedLessons.length > 0}
+        summaryInfo={headerSummaryInfo}
       />
 
       {/* Main Container */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8">
         {step === 'setup' && (
           <div className="space-y-8 animate-in fade-in-50">
+            {/* Resume pending in-progress quiz banner */}
+            {pendingResumeSession && (
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300 text-amber-950 shadow-md flex flex-wrap items-center justify-between gap-4 animate-in slide-in-from-top-2">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center font-bold shadow-md shadow-amber-500/30 shrink-0">
+                    <Sparkles className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-md bg-amber-200 text-amber-900 font-bold text-[11px] uppercase">
+                        Khôi phục bài thi
+                      </span>
+                      <h4 className="font-extrabold text-sm sm:text-base text-amber-950 line-clamp-1">
+                        {pendingResumeSession.lessonTitle}
+                      </h4>
+                    </div>
+                    <p className="text-xs text-amber-800 mt-0.5">
+                      Bạn có một bài thi chưa hoàn thành (đã làm {Object.keys(pendingResumeSession.userAnswers).length}/{pendingResumeSession.totalQuestions} câu). Bạn có muốn tiếp tục làm bài không?
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        localStorage.removeItem('ontap_active_session');
+                      } catch {}
+                      setPendingResumeSession(null);
+                    }}
+                    className="px-3.5 py-2 rounded-xl border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold transition-colors cursor-pointer"
+                  >
+                    Bỏ qua
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sound.playClick();
+                      setCurrentSession(pendingResumeSession);
+                      setPendingResumeSession(null);
+                      setStep('quiz');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white font-extrabold text-xs sm:text-sm shadow-md shadow-amber-600/30 transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-white" />
+                    <span>Tiếp tục làm bài</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Hero Banner */}
             <div className="relative overflow-hidden rounded-3xl bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-950 text-white p-6 sm:p-10 shadow-xl border border-indigo-700/40">
               <div className="relative z-10 max-w-3xl space-y-3">
@@ -1338,6 +1633,16 @@ export default function App() {
               onOpenScorebook={() => setIsScorebookModalOpen(true)}
             />
 
+            {/* MỤC: ĐỀ THI & ĐỀ ÔN TẬP TỪ GIÁO VIÊN (ADMIN STUDIO) */}
+            <AdminExamSection
+              customExams={customExams}
+              currentGradeFilter={currentGradeFilter}
+              onLaunchExam={handleLaunchCustomExam}
+              onPrintExam={handlePrintCustomExam}
+              onOpenAdminStudio={handleOpenAdminStudio}
+              isAdmin={Boolean(adminSession && isAuthorizedAdmin(adminSession.email))}
+            />
+
             {/* Step 1: Chọn Khối lớp & Bài học (Hỗ trợ chọn nhiều bài học) */}
             <div id="lesson-selector-section">
               <LessonSelector
@@ -1386,10 +1691,14 @@ export default function App() {
               onSaveApiKey={handleSaveApiKey}
             />
 
-            {/* Submit Action Button */}
-            <div className="pt-2 sticky bottom-4 z-20">
-              <div className="bg-white/95 backdrop-blur-md p-4 rounded-2xl border border-slate-200 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
+            {/* Submit Action Block (Không còn dính nổi che màn hình, nút chính đã cố định trên Header) */}
+            <div className="pt-4 pb-6">
+              <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-md flex flex-col sm:flex-row items-center justify-between gap-4">
                 <div className="text-xs sm:text-sm text-slate-600">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="font-bold text-slate-800">Cấu hình ôn tập hiện tại:</span>
+                  </div>
                   <span>Bạn đang chọn: </span>
                   <strong className="text-indigo-700">
                     {isCustomMode
@@ -1420,7 +1729,7 @@ export default function App() {
                   type="button"
                   onClick={handleStartGenerateQuiz}
                   disabled={isGenerating || (!isCustomMode && selectedLessons.length === 0)}
-                  className="w-full sm:w-auto px-8 py-3.5 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-indigo-800 hover:from-indigo-700 hover:to-indigo-900 text-white font-black text-sm sm:text-base shadow-lg shadow-indigo-600/30 hover:shadow-indigo-600/40 transition-all flex items-center justify-center gap-2.5 active:scale-98 disabled:opacity-50"
+                  className="w-full sm:w-auto px-8 py-3.5 rounded-2xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-black text-sm sm:text-base shadow-lg shadow-indigo-600/30 hover:shadow-indigo-600/40 transition-all flex items-center justify-center gap-2.5 active:scale-98 disabled:opacity-50 cursor-pointer"
                 >
                   {isGenerating ? (
                     <>
@@ -1474,7 +1783,7 @@ export default function App() {
             onAnswerQuestion={handleAnswerQuestion}
             onToggleFlag={handleToggleFlag}
             onSubmitQuiz={handleSubmitQuiz}
-            onExitQuiz={() => setStep('setup')}
+            onExitQuiz={handleExitQuiz}
             studentProfile={studentProfile}
           />
         )}
@@ -1485,8 +1794,14 @@ export default function App() {
             session={currentSession}
             onRetakeQuiz={handleRetakeQuiz}
             onGenerateNewWithSameTopic={handleGenerateNewWithSameTopic}
-            onGoHome={() => setStep('setup')}
-            onPrint={() => setStep('print')}
+            onGoHome={() => {
+              setCurrentSession(null);
+              setStep('setup');
+            }}
+            onPrint={() => {
+              setStepBeforePrint('result');
+              setStep('print');
+            }}
             studentProfile={studentProfile}
             onViewCertificate={handleOpenCertificate}
           />
@@ -1496,7 +1811,7 @@ export default function App() {
         {step === 'print' && currentSession && (
           <PrintView
             session={currentSession}
-            onBack={() => setStep('result')}
+            onBack={() => setStep(stepBeforePrint)}
             studentProfile={studentProfile}
           />
         )}
@@ -1584,6 +1899,33 @@ export default function App() {
         isOpen={isCertificateModalOpen}
         onClose={() => setIsCertificateModalOpen(false)}
         certificates={activeCertificates}
+      />
+
+      {/* Admin Authentication Modal (Xác thực saohom2002@gmail.com) */}
+      <AdminAuthModal
+        isOpen={isAdminAuthModalOpen}
+        onClose={() => setIsAdminAuthModalOpen(false)}
+        onSuccessOpenStudio={() => {
+          setIsAdminAuthModalOpen(false);
+          setIsAdminStudioModalOpen(true);
+        }}
+        adminSession={adminSession}
+        setAdminSession={setAdminSession}
+      />
+
+      {/* Admin Studio Modal (Tạo đề thi, đề ôn tập, quản trị câu hỏi) */}
+      <AdminStudioModal
+        isOpen={isAdminStudioModalOpen}
+        onClose={() => setIsAdminStudioModalOpen(false)}
+        adminSession={adminSession}
+        onOpenAuth={() => {
+          setIsAdminStudioModalOpen(false);
+          setIsAdminAuthModalOpen(true);
+        }}
+        customExams={customExams}
+        setCustomExams={setCustomExams}
+        onLaunchExam={handleLaunchCustomExam}
+        onPrintExam={handlePrintCustomExam}
       />
     </div>
   );

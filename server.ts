@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { generateFallbackQuestions } from './src/data/curriculum';
+import { parseQuestionsFromRawText } from './src/utils/documentQuestionParser';
 
 dotenv.config();
 
@@ -35,8 +36,30 @@ const CANDIDATE_MODELS = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
   'gemini-1.5-flash',
-  'gemini-3.8-flash',
+  'gemini-1.5-pro',
 ].filter(Boolean) as string[];
+
+/**
+ * Trích xuất và phân tích JSON an toàn, tự động loại bỏ markdown code fences (```json ... ```)
+ */
+function parseJsonSafely(raw?: string, fallback: any = null): any {
+  if (!raw) return fallback;
+  let cleaned = raw.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  }
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+    if (match) {
+      try {
+        return JSON.parse(match[1]);
+      } catch {}
+    }
+    return fallback;
+  }
+}
 
 async function generateWithModelFallback(client: GoogleGenAI, requestConfig: any) {
   let lastError: any = null;
@@ -249,7 +272,7 @@ Quy chuẩn chất lượng câu hỏi:
     });
 
     const text = response.text || '[]';
-    let questions = JSON.parse(text);
+    let questions = parseJsonSafely(text, []);
 
     if (!Array.isArray(questions) || questions.length === 0) {
       throw new Error('Invalid format returned by AI model');
@@ -350,6 +373,254 @@ Hãy trả lời xưng là "Cô Trúc" một cách ân cần, nhiệt tình, sư
     return res.json({
       success: false,
       explanation: explanation || 'Hãy ôn tập lại công thức và lý thuyết bài học để hiểu rõ hơn nhé!',
+    });
+  }
+});
+
+// API: Bóc tách câu hỏi từ tệp đề thi (Word / PDF / Text)
+app.post('/api/parse-exam-document', async (req, res) => {
+  const {
+    fileBase64 = '',
+    filename = 'exam_document',
+    mimeType = '',
+    gradeNumber = 8,
+    examCategory = 'exam',
+    questionType = 'multiple_choice',
+    questionCount = 'all',
+    difficultyMode = 'original',
+    strictOriginal = true,
+    autoGenerateAnswerIfMissing = true,
+    apiKey = '',
+  } = req.body;
+
+  if (!fileBase64) {
+    return res.status(400).json({
+      success: false,
+      message: 'Vui lòng cung cấp dữ liệu tệp tải lên!',
+    });
+  }
+
+  try {
+    const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+    const lowerFilename = filename.toLowerCase();
+
+    let rawText = '';
+    const isDocx = lowerFilename.endsWith('.docx') || mimeType.includes('wordprocessingml') || mimeType.includes('docx');
+    const isPdf = lowerFilename.endsWith('.pdf') || mimeType.includes('pdf');
+    const isTxt = lowerFilename.endsWith('.txt') || mimeType.includes('text/plain');
+
+    if (isDocx) {
+      try {
+        const mammothModule = await import('mammoth');
+        const mammoth = mammothModule.default || mammothModule;
+        const result = await mammoth.extractRawText({ buffer });
+        rawText = result.value || '';
+      } catch (docxErr: any) {
+        console.warn('Lỗi đọc Word DOCX:', docxErr?.message);
+      }
+    } else if (isPdf) {
+      try {
+        const pdfModule: any = await import('pdf-parse');
+        const PDFParseClass = pdfModule.PDFParse || pdfModule.default?.PDFParse;
+        if (typeof PDFParseClass === 'function' && PDFParseClass.prototype?.load) {
+          const parser = new PDFParseClass({ data: buffer });
+          await parser.load();
+          const textRes = await parser.getText();
+          rawText = typeof textRes === 'string' ? textRes : (textRes?.text || '');
+          await parser.destroy();
+        } else if (typeof pdfModule.default === 'function') {
+          const parsed = await pdfModule.default(buffer);
+          rawText = parsed?.text || '';
+        }
+      } catch (pdfErr: any) {
+        console.warn('Lỗi đọc PDF:', pdfErr?.message);
+      }
+    } else if (isTxt) {
+      rawText = buffer.toString('utf-8');
+    }
+
+    // Kiểm tra Gemini AI Client
+    const headerKey = req.headers['x-gemini-api-key'] as string;
+    const activeClient = getGenAIClient(apiKey || headerKey);
+
+    let aiResult: any = null;
+
+    if (activeClient) {
+      try {
+        const typeDesc =
+          questionType === 'multiple_choice'
+            ? 'Định dạng câu hỏi: Trắc nghiệm 4 lựa chọn (A, B, C, D).'
+            : questionType === 'true_false'
+            ? 'Định dạng câu hỏi: Đúng / Sai.'
+            : questionType === 'fill_blank'
+            ? 'Định dạng câu hỏi: Điền khuyết / điền từ vào chỗ trống.'
+            : 'Định dạng câu hỏi: Giữ nguyên các dạng câu hỏi có trong tài liệu (trắc nghiệm, đúng sai, điền từ...).';
+
+        const countDesc =
+          typeof questionCount === 'number' && questionCount > 0
+            ? (strictOriginal
+                ? `Số lượng câu hỏi: Lấy tối đa đúng ${questionCount} câu từ tài liệu gốc.`
+                : `Số lượng câu hỏi: Cần đúng ${questionCount} câu. Nếu tài liệu gốc có ít hơn ${questionCount} câu, hãy tự sinh thêm các câu hỏi chất lượng cao cùng chủ đề SGK Kết Nối Tri Thức để đủ ${questionCount} câu.`)
+            : 'Số lượng câu hỏi: Bóc tách toàn bộ tất cả các câu hỏi có trong tài liệu gốc.';
+
+        const diffDesc =
+          difficultyMode === 'tong_hop'
+            ? 'Mức độ: Phân bổ ma trận chuẩn Bộ GD&ĐT (40% Dễ - Nhận biết, 40% Trung bình - Thông hiểu, 20% Khó - Vận dụng).'
+            : difficultyMode === 'de'
+            ? 'Mức độ: Ưu tiên cấp độ Dễ (Nhận biết kiến thức cốt lõi).'
+            : difficultyMode === 'trung_binh'
+            ? 'Mức độ: Ưu tiên cấp độ Trung bình (Thông hiểu & vận dụng).'
+            : difficultyMode === 'kho'
+            ? 'Mức độ: Ưu tiên cấp độ Khó (Vận dụng cao, tư duy phân tích).'
+            : 'Mức độ: Theo phân bổ độ khó tự nhiên của tài liệu gốc.';
+
+        const strictDesc = strictOriginal
+          ? `⚡ YÊU CẦU 100% THEO TÀI LIỆU GỐC (BẮT BUỘC TUYỆT ĐỐI):
+1. GIỮ NGUYÊN VĂN 100% câu hỏi và các phương án từ tài liệu gốc, KHÔNG được tự ý thay đổi câu chữ, không thêm thắt hoặc tự sinh thêm câu hỏi bên ngoài.
+2. CHỈ bóc tách các câu hỏi thực sự có trong văn bản tài liệu gốc.
+3. ${autoGenerateAnswerIfMissing 
+      ? 'Nếu tài liệu gốc đã ghi đáp án: Lấy chính xác đáp án đó. Nếu tài liệu gốc CHƯA có sẵn đáp án: Hãy dùng chuyên môn Tin học THCS để giải và chọn đáp án chính xác nhất (correctAnswer: 0, 1, 2, hoặc 3) và giải thích lý do.' 
+      : 'Bảo lưu đáp án từ tài liệu gốc.'}`
+          : `🤖 CHẾ ĐỘ AI TỰ SINH & HỖ TRỢ SƯ PHẠM:
+1. Bóc tách câu hỏi từ tài liệu và có thể trau chuốt, tinh chỉnh câu chữ cho chuẩn văn phong sư phạm GDPT 2018.
+2. ${autoGenerateAnswerIfMissing ? 'Tự động tạo đáp án chính xác nhất, lời giải thích chi tiết từng bước và gợi ý tư duy cho học sinh.' : ''}
+3. ${diffDesc}`;
+
+        const basePrompt = `Bạn là chuyên gia thẩm định và bóc tách đề thi Tin học THCS / Tiểu học theo chuẩn Bộ Giáo Dục và Đào Tạo Việt Nam (SGK Tin học Kết Nối Tri Thức Với Cuộc Sống).
+Nhiệm vụ của bạn là bóc tách đề thi từ tài liệu dưới đây thành đúng cấu trúc chuẩn.
+
+THÔNG TIN ĐỀ THI:
+- Tên tệp gốc: "${filename}"
+- Khối lớp: "Khối ${gradeNumber || 8}"
+- Loại đề: "${examCategory === 'exam' ? 'Đề thi kiểm tra (Tính giờ)' : 'Đề ôn tập tự do'}"
+- ${typeDesc}
+- ${countDesc}
+
+${strictDesc}
+
+YÊU CẦU ĐẦU RA JSON:
+- "suggestedTitle": Gợi ý tên đề thi phù hợp (ngắn gọn, chuẩn sư phạm)
+- "summary": Tóm tắt 1-2 câu về nội dung và cấu trúc đề thi
+- "questions": Danh sách câu hỏi gồm:
+  + "question": Nội dung câu hỏi sạch sẽ (bỏ nhãn 'Câu 1:', 'Câu 2:' ở đầu)
+  + "options": Mảng các phương án trả lời (đã bỏ tiền tố 'A.', 'B.', 'C.', 'D.')
+  + "correctAnswer": Số nguyên vị trí đáp án đúng (0 cho A, 1 cho B, 2 cho C, 3 cho D)
+  + "explanation": Lời giải thích sư phạm vì sao đáp án đúng
+  + "difficulty": 'de' | 'trung_binh' | 'kho'
+  + "hint": Gợi ý suy nghĩ ngắn
+  + "topic": Bài học hoặc chủ đề tương ứng
+`;
+
+        let contents: any[] = [];
+        if (isPdf && (!rawText || rawText.trim().length < 50)) {
+          contents = [
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: cleanBase64,
+              },
+            },
+            basePrompt,
+          ];
+        } else {
+          contents = [
+            `${basePrompt}\n\nNội dung văn bản đề thi trích xuất:\n"""\n${rawText.slice(0, 45000)}\n"""`,
+          ];
+        }
+
+        const aiResponse = await generateWithModelFallback(activeClient, {
+          contents,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                suggestedTitle: { type: Type.STRING },
+                summary: { type: Type.STRING },
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      question: { type: Type.STRING },
+                      options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                      correctAnswer: { type: Type.INTEGER },
+                      explanation: { type: Type.STRING },
+                      difficulty: { type: Type.STRING },
+                      hint: { type: Type.STRING },
+                      topic: { type: Type.STRING },
+                    },
+                    required: ['question', 'options', 'correctAnswer', 'explanation', 'difficulty'],
+                  },
+                },
+              },
+              required: ['questions'],
+            },
+          },
+        });
+
+        const parsed = parseJsonSafely(aiResponse.text, {});
+        if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+          aiResult = {
+            suggestedTitle: parsed.suggestedTitle || filename.replace(/\.[^/.]+$/, ''),
+            summary: parsed.summary || `Đã bóc tách thành công ${parsed.questions.length} câu hỏi từ tệp ${filename}`,
+            questions: parsed.questions.map((q: any, idx: number) => ({
+              id: `q-doc-ai-${Date.now()}-${idx + 1}-${Math.random().toString(36).slice(2, 6)}`,
+              type: 'multiple_choice',
+              question: q.question,
+              options: Array.isArray(q.options) && q.options.length === 4 ? q.options : ['A', 'B', 'C', 'D'],
+              correctAnswer: typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer <= 3 ? q.correctAnswer : 0,
+              explanation: q.explanation || 'Giải thích chuẩn kiến thức Tin học SGK Kết Nối Tri Thức.',
+              difficulty: ['de', 'trung_binh', 'kho'].includes(q.difficulty) ? q.difficulty : (difficultyMode === 'tong_hop' ? 'trung_binh' : (['de', 'trung_binh', 'kho'].includes(difficultyMode) ? difficultyMode : 'trung_binh')),
+              hint: q.hint || 'Hãy đọc kỹ câu hỏi và các phương án.',
+              topic: q.topic || `Khối ${gradeNumber}`,
+            })),
+            source: 'gemini_ai',
+          };
+        }
+      } catch (aiErr: any) {
+        console.warn('AI Parsing failed, falling back to local regex parser:', aiErr?.message);
+      }
+    }
+
+    if (aiResult) {
+      return res.json({
+        success: true,
+        source: 'gemini_ai',
+        suggestedTitle: aiResult.suggestedTitle,
+        summary: aiResult.summary,
+        questions: aiResult.questions,
+        totalQuestions: aiResult.questions.length,
+        rawTextLength: rawText.length,
+      });
+    }
+
+    // Fallback: Sử dụng regex parser nội bộ
+    const fallbackResult = parseQuestionsFromRawText(rawText, {
+      defaultTopic: `Tin học ${gradeNumber}`,
+      gradeNumber,
+      questionCount: typeof questionCount === 'number' ? questionCount : 'all',
+      strictOriginal: !!strictOriginal,
+      autoGenerateAnswerIfMissing: !!autoGenerateAnswerIfMissing,
+      fallbackDifficulty: ['de', 'trung_binh', 'kho'].includes(difficultyMode) ? difficultyMode : 'trung_binh',
+    });
+
+    return res.json({
+      success: true,
+      source: 'offline_parser',
+      suggestedTitle: fallbackResult.suggestedTitle || filename.replace(/\.[^/.]+$/, ''),
+      summary: fallbackResult.summary,
+      questions: fallbackResult.questions,
+      totalQuestions: fallbackResult.questions.length,
+      warnings: fallbackResult.warnings,
+      rawTextLength: rawText.length,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/parse-exam-document:', error);
+    return res.status(500).json({
+      success: false,
+      message: error?.message || 'Không thể bóc tách tệp đề thi. Vui lòng kiểm tra lại định dạng tệp!',
     });
   }
 });

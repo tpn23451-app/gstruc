@@ -104,6 +104,63 @@ export const QuizScreen: React.FC<QuizScreenProps> = ({
     }
   };
 
+  // Keyboard navigation for computer science students (A/B/C/D, 1/2/3/4, Arrows, F, H)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (showSubmitConfirm || showExitConfirm || showPalette) {
+        if (e.key === 'Escape') {
+          setShowSubmitConfirm(false);
+          setShowExitConfirm(false);
+          setShowPalette(false);
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handlePrev();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        sound.playClick();
+        onToggleFlag(currentIndex);
+      } else if (e.key === 'h' || e.key === 'H') {
+        if (currentQ?.hint) {
+          e.preventDefault();
+          sound.playClick();
+          setShowHint((prev) => !prev);
+        }
+      } else if (currentQ && (!currentQ.type || currentQ.type === 'multiple_choice')) {
+        let optIdx = -1;
+        const key = e.key.toLowerCase();
+        if (key === '1' || key === 'a') optIdx = 0;
+        else if (key === '2' || key === 'b') optIdx = 1;
+        else if (key === '3' || key === 'c') optIdx = 2;
+        else if (key === '4' || key === 'd') optIdx = 3;
+
+        if (optIdx >= 0 && optIdx < currentQ.options.length) {
+          e.preventDefault();
+          handleSelectAnswer(optIdx);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentIndex, currentQ, total, showSubmitConfirm, showExitConfirm, showPalette]);
+
   const optionLetters = ['A', 'B', 'C', 'D'];
   const qType = currentQ.type || 'multiple_choice';
 
@@ -502,6 +559,25 @@ export const QuizScreen: React.FC<QuizScreenProps> = ({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Keyboard Shortcuts Hint Bar for Desktop */}
+      <div className="hidden sm:flex items-center justify-center gap-4 text-[11px] text-slate-400 font-medium py-1">
+        <span>⌨️ Phím tắt:</span>
+        <span className="flex items-center gap-1">
+          <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">1-4</kbd> hoặc <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">A-D</kbd> Chọn đáp án
+        </span>
+        <span className="flex items-center gap-1">
+          <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">←</kbd> <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">→</kbd> Đổi câu
+        </span>
+        <span className="flex items-center gap-1">
+          <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">F</kbd> Ghim
+        </span>
+        {currentQ?.hint && (
+          <span className="flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-600 font-mono font-bold text-[10px]">H</kbd> Gợi ý
+          </span>
+        )}
       </div>
 
       {/* Submit Confirmation Dialog */}

@@ -171,6 +171,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
     setIsExplaining(true);
 
     try {
+      const userApiKey = localStorage.getItem('ontap_gemini_api_key') || '';
       const res = await fetch('/api/explain-question', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -180,6 +181,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
           correctAnswer: q.correctAnswer,
           explanation: q.explanation,
           studentQuery: 'Em chưa hiểu rõ câu này, thầy cô giải thích cặn kẽ và mách mẹo ghi nhớ cho em với ạ!',
+          apiKey: userApiKey,
         }),
       });
       const data = await res.json();
@@ -195,6 +197,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
     if (!studentQuestionInput.trim() || !activeExplainQ) return;
     setIsExplaining(true);
     try {
+      const userApiKey = localStorage.getItem('ontap_gemini_api_key') || '';
       const res = await fetch('/api/explain-question', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -204,6 +207,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
           correctAnswer: activeExplainQ.correctAnswer,
           explanation: activeExplainQ.explanation,
           studentQuery: studentQuestionInput,
+          apiKey: userApiKey,
         }),
       });
       const data = await res.json();
